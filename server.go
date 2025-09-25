@@ -29,6 +29,7 @@ type Message struct {
 	Username string `json:"username,omitempty"`
 	Content  string `json:"content"`
 	Target   string `json:"target,omitempty"`
+	Avatar   string `json:"avatar,omitempty"`
 }
 
 var (
@@ -42,7 +43,7 @@ var (
 func main() {
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
-	http.HandleFunc("/ws", handleConnctions)
+	http.HandleFunc("/ws", handleConnections)
 
 	go handleBroadcast()
 	go handleClientRegistration()
@@ -53,7 +54,7 @@ func main() {
 	}
 }
 
-func handleConnctions(w http.ResponseWriter, r *http.Request) {
+func handleConnections(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("升级websocket失败：", err)
@@ -73,7 +74,6 @@ func handleConnctions(w http.ResponseWriter, r *http.Request) {
 func handleClientSend(client *Client) {
 	defer func() {
 		log.Printf("handleClientSend 退出 %s", client.username)
-		close(client.send)
 		client.conn.Close()
 	}()
 
@@ -114,8 +114,9 @@ func handleMessages(client *Client) {
 		var msg Message
 		if err := client.conn.ReadJSON(&msg); err != nil {
 			log.Printf("读取消息失败：%v", err)
-			continue
+			break
 		}
+
 		switch msg.Type {
 		case "set_username":
 			if isUsernameTaken(msg.Username) {
@@ -144,28 +145,30 @@ func handleMessages(client *Client) {
 		case "message":
 			if msg.Target != "" {
 				log.Printf("私聊消息: %s -> %s", client.username, msg.Target)
-				// 私聊消息
+				var targets []*Client
+
 				mu.Lock()
 				for c := range clients {
 					if c.username == msg.Target || c.username == client.username {
-						// 发送给目标用户和发送者
-						privateMsg := Message{
-							Type:     "private",
-							Username: client.username,
-							Content:  msg.Content,
-							Target:   msg.Target,
-						}
-						jsonMsg, err := json.Marshal(privateMsg)
-						if err != nil {
-							log.Printf("序列化私聊消息失败：%v", err)
-							continue
-						}
-						// 发送私聊消息
-						log.Printf("发送私聊消息：%s", string(jsonMsg))
-						c.send <- jsonMsg
-						mu.Unlock()
-						break
+						targets = append(targets, c)
 					}
+				}
+				mu.Unlock()
+
+				for _, c := range targets {
+					privateMsg := Message{
+						Type:     "private",
+						Username: client.username,
+						Content:  msg.Content,
+						Target:   msg.Target,
+					}
+					jsonMsg, err := json.Marshal(privateMsg)
+					if err != nil {
+						log.Printf("序列化私聊消息失败：%v", err)
+						continue
+					}
+					log.Printf("发送私聊消息：%s", string(jsonMsg))
+					c.send <- jsonMsg
 				}
 			} else {
 				mu.Unlock()
@@ -222,6 +225,7 @@ func handleClientRegistration() {
 			mu.Lock()
 			if _, ok := clients[client]; ok {
 				delete(clients, client)
+				client.conn.Close()
 				mu.Unlock()
 				//发送更新后的用户列表
 				sendUserListToAll()
@@ -249,7 +253,7 @@ func sendUserListToAll() {
 
 	jsonMsg, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("用户列表序列化错误：%v", jsonMsg)
+		log.Printf("用户列表序列化错误：%v", err)
 		return
 	}
 	log.Printf("发送用户列表信息：%s", string(jsonMsg))
